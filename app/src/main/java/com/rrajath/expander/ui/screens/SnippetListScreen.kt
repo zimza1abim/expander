@@ -18,6 +18,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.rrajath.expander.data.Snippet
 import com.rrajath.expander.service.TextExpansionService
+import com.rrajath.expander.ui.SnippetSortMode
 import com.rrajath.expander.ui.components.EmptyState
 import com.rrajath.expander.ui.components.SearchBar
 
@@ -26,7 +27,9 @@ import com.rrajath.expander.ui.components.SearchBar
 fun SnippetListScreen(
     snippets: List<Snippet>,
     searchQuery: String,
+    sortMode: SnippetSortMode,
     onSearchQueryChange: (String) -> Unit,
+    onSortModeChange: (SnippetSortMode) -> Unit,
     onSnippetClick: (Long) -> Unit,
     onSnippetDelete: (Snippet) -> Unit,
     onSnippetToggle: (Snippet) -> Unit,
@@ -34,6 +37,7 @@ fun SnippetListScreen(
     onSettingsClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var showSortMenu by remember { mutableStateOf(false) }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -133,7 +137,47 @@ fun SnippetListScreen(
                 onQueryChange = onSearchQueryChange
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                Box {
+                    TextButton(onClick = { showSortMenu = true }) {
+                        Text(
+                            text = if (sortMode == SnippetSortMode.RECENTLY_ADDED) "Recently added" else "Name (A–Z)"
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Icon(Icons.Default.ArrowDropDown, contentDescription = "Sort snippets")
+                    }
+                    DropdownMenu(
+                        expanded = showSortMenu,
+                        onDismissRequest = { showSortMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Recently added") },
+                            onClick = {
+                                onSortModeChange(SnippetSortMode.RECENTLY_ADDED)
+                                showSortMenu = false
+                            },
+                            trailingIcon = {
+                                if (sortMode == SnippetSortMode.RECENTLY_ADDED) Icon(Icons.Default.Check, null)
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Name (A–Z)") },
+                            onClick = {
+                                onSortModeChange(SnippetSortMode.NAME)
+                                showSortMenu = false
+                            },
+                            trailingIcon = {
+                                if (sortMode == SnippetSortMode.NAME) Icon(Icons.Default.Check, null)
+                            }
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
 
             if (snippets.isEmpty()) {
                 EmptyState(

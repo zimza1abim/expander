@@ -55,6 +55,7 @@ fun NavGraph(
 
     val snippets by viewModel.snippets.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
+    val sortMode by viewModel.sortMode.collectAsState()
 
     // Export launcher
     val exportLauncher = rememberLauncherForActivityResult(
@@ -104,7 +105,9 @@ fun NavGraph(
             SnippetListScreen(
                 snippets = snippets,
                 searchQuery = searchQuery,
+                sortMode = sortMode,
                 onSearchQueryChange = viewModel::updateSearchQuery,
+                onSortModeChange = viewModel::updateSortMode,
                 onSnippetClick = { snippetId ->
                     navController.navigate(Screen.EditSnippet.createRoute(snippetId))
                 },

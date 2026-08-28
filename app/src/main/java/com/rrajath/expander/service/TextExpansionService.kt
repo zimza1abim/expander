@@ -2,25 +2,27 @@ package com.rrajath.expander.service
 
 import android.accessibilityservice.AccessibilityService
 import android.content.Context
-import android.content.SharedPreferences
+import android.graphics.Rect
 import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import androidx.core.os.bundleOf
+import android.view.WindowInsets
+import android.view.WindowManager
 import com.rrajath.expander.data.AppDatabase
 import com.rrajath.expander.data.Snippet
 import com.rrajath.expander.data.SnippetRepository
 import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.first
 
 class TextExpansionService : AccessibilityService() {
 
     private lateinit var repository: SnippetRepository
-    private lateinit var prefs: SharedPreferences
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     private var snippetsCache: List<Snippet> = emptyList()
     private var lastProcessedText = ""
+    private lateinit var suggestionOverlay: SnippetSuggestionOverlay
+    private var suggestionTarget: SuggestionTarget? = null
+    private var activeWindowCheck: Job? = null
 
     // Undo tracking
     private var lastExpansion: ExpansionHistory? = null
@@ -31,12 +33,24 @@ class TextExpansionService : AccessibilityService() {
         val textBeforeTrigger: String
     )
 
+    private data class SuggestionTarget(
+        val node: AccessibilityNodeInfo,
+        val token: TypedToken
+    )
+
     companion object {
         private const val PREFS_NAME = "expander_prefs"
         private const val KEY_SERVICE_ENABLED = "service_enabled"
         private const val KEY_SMART_PUNCTUATION_ENABLED = "smart_punctuation_enabled"
         private const val KEY_SMART_PUNCTUATION_CHARS = "smart_punctuation_chars"
+        private const val KEY_PARTIAL_SUGGESTIONS_ENABLED = "partial_suggestions_enabled"
+        private const val KEY_PARTIAL_SUGGESTIONS_MIN_LENGTH = "partial_suggestions_min_length"
+        private const val KEY_PARTIAL_SUGGESTIONS_MAX_RESULTS = "partial_suggestions_max_results"
+        private const val KEY_SUGGESTION_MENU_LAYOUT = "suggestion_menu_layout"
+        private const val KEY_SUGGESTION_COLOR_MODE = "suggestion_color_mode"
 
+        const val DEFAULT_PARTIAL_SUGGESTIONS_MIN_LENGTH = 3
+        const val DEFAULT_PARTIAL_SUGGESTIONS_MAX_RESULTS = 5
         // Punctuation that should never have a space before it. If the keyboard's
         // symbol popup inserts one of these after a trailing space, the space is
         // removed and moved to after the punctuation instead. User-configurable via
@@ -81,6 +95,59 @@ class TextExpansionService : AccessibilityService() {
                 .apply()
         }
 
+        fun arePartialSuggestionsEnabled(context: Context): Boolean =
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getBoolean(KEY_PARTIAL_SUGGESTIONS_ENABLED, false)
+
+        fun setPartialSuggestionsEnabled(context: Context, enabled: Boolean) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                .putBoolean(KEY_PARTIAL_SUGGESTIONS_ENABLED, enabled).apply()
+        }
+
+        fun getPartialSuggestionsMinLength(context: Context): Int =
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getInt(KEY_PARTIAL_SUGGESTIONS_MIN_LENGTH, DEFAULT_PARTIAL_SUGGESTIONS_MIN_LENGTH)
+                .coerceIn(1, 20)
+
+        fun setPartialSuggestionsMinLength(context: Context, value: Int) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                .putInt(KEY_PARTIAL_SUGGESTIONS_MIN_LENGTH, value.coerceIn(1, 20)).apply()
+        }
+
+        fun getPartialSuggestionsMaxResults(context: Context): Int =
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getInt(KEY_PARTIAL_SUGGESTIONS_MAX_RESULTS, DEFAULT_PARTIAL_SUGGESTIONS_MAX_RESULTS)
+                .coerceIn(1, 10)
+
+        fun setPartialSuggestionsMaxResults(context: Context, value: Int) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                .putInt(KEY_PARTIAL_SUGGESTIONS_MAX_RESULTS, value.coerceIn(1, 10)).apply()
+        }
+
+        fun getSuggestionMenuLayout(context: Context): SuggestionMenuLayout {
+            val stored = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString(KEY_SUGGESTION_MENU_LAYOUT, SuggestionMenuLayout.LIST.name)
+            return runCatching { SuggestionMenuLayout.valueOf(stored ?: "") }
+                .getOrDefault(SuggestionMenuLayout.LIST)
+        }
+
+        fun setSuggestionMenuLayout(context: Context, layout: SuggestionMenuLayout) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                .putString(KEY_SUGGESTION_MENU_LAYOUT, layout.name).apply()
+        }
+
+        fun getSuggestionColorMode(context: Context): SuggestionColorMode {
+            val stored = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString(KEY_SUGGESTION_COLOR_MODE, SuggestionColorMode.AUTO.name)
+            return runCatching { SuggestionColorMode.valueOf(stored ?: "") }
+                .getOrDefault(SuggestionColorMode.AUTO)
+        }
+
+        fun setSuggestionColorMode(context: Context, mode: SuggestionColorMode) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                .putString(KEY_SUGGESTION_COLOR_MODE, mode.name).apply()
+        }
+
         /** Parses the raw space-separated string into single-character tokens, ignoring the rest. */
         fun parseSmartPunctuationChars(raw: String): Set<Char> {
             return raw.split(" ", "\t", "\n")
@@ -107,7 +174,7 @@ class TextExpansionService : AccessibilityService() {
         super.onCreate()
         val database = AppDatabase.getDatabase(applicationContext)
         repository = SnippetRepository(database.snippetDao())
-        prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        suggestionOverlay = SnippetSuggestionOverlay(this, ::insertSuggestion)
 
         // Load snippets into cache
         serviceScope.launch {
@@ -119,9 +186,23 @@ class TextExpansionService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
-        if (!isServiceEnabled(this)) return
+        if (!isServiceEnabled(this)) {
+            dismissSuggestions()
+            return
+        }
 
-        // Only process text change events
+        // An accessibility overlay belongs to the current app window only. Close it
+        // only after confirming the active input window really changed. Samsung emits
+        // delayed window-state events for the overlay and IME themselves, so an event
+        // alone must never be treated as proof that the user changed apps.
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+            event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
+        ) {
+            verifySuggestionWindowAfterTransition()
+            return
+        }
+
+        // Text changes are the only events that can create or refresh suggestions.
         if (event.eventType != AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED) return
 
         val source = event.source ?: return
@@ -133,7 +214,6 @@ class TextExpansionService : AccessibilityService() {
             if (shouldUndoExpansion(currentText)) {
                 undoExpansion(source)
                 lastProcessedText = currentText
-                source.recycle()
                 return
             }
 
@@ -143,14 +223,17 @@ class TextExpansionService : AccessibilityService() {
             when {
                 // Our own ACTION_SET_TEXT echo right after an expansion. Ignore it so
                 // we neither re-expand the result nor disturb the undo history.
-                fullExpandedText != null && currentText == fullExpandedText -> Unit
+                fullExpandedText != null && currentText == fullExpandedText -> dismissSuggestions()
 
                 // Text ends with a space: candidate for expansion.
                 currentText.endsWith(" ") && currentText.isNotEmpty() -> {
+                    dismissSuggestions()
                     if (!applySmartPunctuationSpacing(source, currentText)) {
                         processTextForExpansion(source, currentText)
                     }
                 }
+
+                else -> updateSuggestions(source, currentText)
             }
 
             // Once the user edits past the freshly-inserted expansion, the undo
@@ -170,6 +253,125 @@ class TextExpansionService : AccessibilityService() {
         } finally {
             source.recycle()
         }
+    }
+
+    private fun updateSuggestions(source: AccessibilityNodeInfo, text: String) {
+        if (!arePartialSuggestionsEnabled(this) || !source.isEditable) {
+            dismissSuggestions()
+            return
+        }
+
+        val cursor = source.textSelectionStart.takeIf { it in 0..text.length } ?: text.length
+        val token = SnippetSuggestionMatcher.tokenAtCursor(text, cursor)
+        if (token == null) {
+            dismissSuggestions()
+            return
+        }
+
+        val matches = SnippetSuggestionMatcher.find(
+            snippets = snippetsCache,
+            token = token.value,
+            minimumLength = getPartialSuggestionsMinLength(this),
+            maximumResults = getPartialSuggestionsMaxResults(this)
+        )
+        if (matches.isEmpty()) {
+            dismissSuggestions()
+            return
+        }
+
+        replaceSuggestionTarget(AccessibilityNodeInfo.obtain(source), token)
+        val bounds = Rect().also(source::getBoundsInScreen)
+        suggestionOverlay.show(
+            matches,
+            bounds,
+            getSuggestionMenuLayout(this),
+            getSuggestionColorMode(this)
+        )
+    }
+
+    private fun verifySuggestionWindowAfterTransition() {
+        if (suggestionTarget == null) return
+        activeWindowCheck?.cancel()
+        activeWindowCheck = serviceScope.launch {
+            // Let Android finish replacing the active window before comparing IDs.
+            delay(150)
+            val target = suggestionTarget ?: return@launch
+            val insets = getSystemService(WindowManager::class.java)
+                .currentWindowMetrics.windowInsets
+            if (!insets.isVisible(WindowInsets.Type.ime())) {
+                dismissSuggestions()
+                return@launch
+            }
+            val activeRoot = rootInActiveWindow ?: return@launch
+            try {
+                if (activeRoot.windowId != target.node.windowId) {
+                    dismissSuggestions()
+                }
+            } finally {
+                activeRoot.recycle()
+            }
+        }
+    }
+
+    private fun insertSuggestion(snippet: Snippet) {
+        val target = suggestionTarget ?: return
+        suggestionOverlay.dismiss()
+
+        try {
+            if (!target.node.refresh()) return
+            val currentText = target.node.text?.toString() ?: return
+            val currentToken = SnippetSuggestionMatcher.tokenAtCursor(
+                currentText,
+                target.node.textSelectionStart.takeIf { it in 0..currentText.length } ?: target.token.end
+            ) ?: return
+
+            // Refuse to write if the app changed the field while the overlay was visible.
+            if (currentToken.start != target.token.start ||
+                !currentToken.value.equals(target.token.value, ignoreCase = false)
+            ) return
+
+            val expansion = SnippetProcessor.process(snippet.expansion)
+            val newText = currentText.replaceRange(currentToken.start, currentToken.end, expansion)
+            val newCursor = currentToken.start + expansion.length
+            val arguments = Bundle().apply {
+                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText)
+            }
+            if (target.node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)) {
+                arguments.clear()
+                arguments.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, newCursor)
+                arguments.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, newCursor)
+                target.node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, arguments)
+
+                if (currentToken.end == currentText.length) {
+                    lastExpansion = ExpansionHistory(
+                        trigger = currentToken.value,
+                        expansion = expansion,
+                        textBeforeTrigger = currentText.substring(0, currentToken.start)
+                    )
+                }
+            }
+        } catch (_: Exception) {
+            // The target app may invalidate its accessibility node at any time.
+        } finally {
+            clearSuggestionTarget()
+        }
+    }
+
+    private fun replaceSuggestionTarget(node: AccessibilityNodeInfo, token: TypedToken) {
+        clearSuggestionTarget()
+        suggestionTarget = SuggestionTarget(node, token)
+    }
+
+    private fun clearSuggestionTarget() {
+        suggestionTarget?.node?.recycle()
+        suggestionTarget = null
+    }
+
+    private fun dismissSuggestions() {
+        activeWindowCheck?.cancel()
+        activeWindowCheck = null
+        if (::suggestionOverlay.isInitialized) suggestionOverlay.dismiss()
+        clearSuggestionTarget()
     }
 
     private fun shouldUndoExpansion(currentText: String): Boolean {
@@ -297,14 +499,18 @@ class TextExpansionService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
-        // Called when the service is interrupted
+        dismissSuggestions()
     }
 
     override fun onDestroy() {
+        dismissSuggestions()
         super.onDestroy()
         serviceScope.cancel()
     }
 }
+
+enum class SuggestionMenuLayout { LIST, HORIZONTAL }
+enum class SuggestionColorMode { AUTO, DARK, LIGHT }
 
 /**
  * Pure decision logic for "delete right after an expansion reverts it back to the

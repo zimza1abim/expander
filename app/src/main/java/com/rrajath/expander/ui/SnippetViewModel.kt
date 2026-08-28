@@ -9,14 +9,18 @@ import com.rrajath.expander.data.SnippetRepository
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
+enum class SnippetSortMode { RECENTLY_ADDED, NAME }
+
 class SnippetViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository: SnippetRepository
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+    private val _sortMode = MutableStateFlow(SnippetSortMode.RECENTLY_ADDED)
+    val sortMode: StateFlow<SnippetSortMode> = _sortMode.asStateFlow()
 
-    val snippets: StateFlow<List<Snippet>> = _searchQuery
+    private val searchedSnippets: Flow<List<Snippet>> = _searchQuery
         .flatMapLatest { query ->
             if (query.isEmpty()) {
                 repository.getAllSnippets()
@@ -24,6 +28,13 @@ class SnippetViewModel(application: Application) : AndroidViewModel(application)
                 repository.searchSnippets(query)
             }
         }
+
+    val snippets: StateFlow<List<Snippet>> = combine(searchedSnippets, _sortMode) { snippets, mode ->
+        when (mode) {
+            SnippetSortMode.RECENTLY_ADDED -> snippets.sortedByDescending { it.createdAt }
+            SnippetSortMode.NAME -> snippets.sortedBy { it.trigger.lowercase() }
+        }
+    }
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5000),
@@ -37,6 +48,10 @@ class SnippetViewModel(application: Application) : AndroidViewModel(application)
 
     fun updateSearchQuery(query: String) {
         _searchQuery.value = query
+    }
+
+    fun updateSortMode(mode: SnippetSortMode) {
+        _sortMode.value = mode
     }
 
     fun insertSnippet(trigger: String, expansion: String, onComplete: (Long) -> Unit = {}) {

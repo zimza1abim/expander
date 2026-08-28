@@ -23,7 +23,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.rrajath.expander"
+        applicationId = "com.rrajath.expander2"
         minSdk = 33
         targetSdk = 36
         versionCode = appVersionCode
