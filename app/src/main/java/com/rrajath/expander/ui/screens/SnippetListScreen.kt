@@ -2,17 +2,20 @@ package com.rrajath.expander.ui.screens
 
 import android.content.Intent
 import android.provider.Settings
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -41,7 +44,7 @@ fun SnippetListScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Expander") },
+                title = { Text("Snippets") },
                 actions = {
                     IconButton(onClick = onSettingsClick) {
                         Icon(
@@ -51,17 +54,6 @@ fun SnippetListScreen(
                     }
                 }
             )
-        },
-        floatingActionButton = {
-            FloatingActionButton(
-                onClick = onAddClick,
-                containerColor = MaterialTheme.colorScheme.primary
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Add,
-                    contentDescription = "Add snippet"
-                )
-            }
         }
     ) { paddingValues ->
         val context = LocalContext.current
@@ -138,17 +130,44 @@ fun SnippetListScreen(
             )
 
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp, bottom = 10.dp),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
             ) {
+                FilledTonalButton(
+                    onClick = onAddClick,
+                    modifier = Modifier.height(40.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    contentPadding = PaddingValues(horizontal = 14.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("New snippet")
+                }
+                Spacer(modifier = Modifier.weight(1f))
                 Box {
-                    TextButton(onClick = { showSortMenu = true }) {
-                        Text(
-                            text = if (sortMode == SnippetSortMode.RECENTLY_ADDED) "Recently added" else "Name (A–Z)"
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Icon(Icons.Default.ArrowDropDown, contentDescription = "Sort snippets")
-                    }
+                    AssistChip(
+                        onClick = { showSortMenu = true },
+                        shape = RoundedCornerShape(14.dp),
+                        label = {
+                            Text(
+                                text = if (sortMode == SnippetSortMode.RECENTLY_ADDED) "Recently added" else "Name (A–Z)"
+                            )
+                        },
+                        trailingIcon = {
+                            Icon(
+                                Icons.Default.ArrowDropDown,
+                                contentDescription = "Sort snippets",
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    )
                     DropdownMenu(
                         expanded = showSortMenu,
                         onDismissRequest = { showSortMenu = false }
@@ -177,12 +196,10 @@ fun SnippetListScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(4.dp))
-
             if (snippets.isEmpty()) {
                 EmptyState(
                     message = if (searchQuery.isEmpty()) {
-                        "No snippets yet.\nTap + to create your first snippet!"
+                        "No snippets yet.\nTap New snippet to create your first one."
                     } else {
                         "No snippets found for \"$searchQuery\""
                     },
@@ -198,7 +215,8 @@ fun SnippetListScreen(
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    contentPadding = PaddingValues(bottom = 12.dp)
                 ) {
                     items(
                         items = snippets,
@@ -210,11 +228,6 @@ fun SnippetListScreen(
                             onDelete = { onSnippetDelete(snippet) },
                             onToggle = { onSnippetToggle(snippet) }
                         )
-                    }
-
-                    // Bottom spacing for FAB
-                    item {
-                        Spacer(modifier = Modifier.height(80.dp))
                     }
                 }
             }
@@ -256,50 +269,33 @@ fun SnippetItem(
         )
     }
 
-    Card(
+    Surface(
         modifier = modifier
             .fillMaxWidth()
+            .alpha(if (snippet.isEnabled) 1f else 0.58f)
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = { showDeleteDialog = true }
             ),
-        colors = CardDefaults.cardColors(
-            containerColor = if (snippet.isEnabled) {
-                MaterialTheme.colorScheme.surfaceVariant
-            } else {
-                MaterialTheme.colorScheme.surface
-            }
-        )
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        tonalElevation = if (snippet.isEnabled) 1.dp else 0.dp
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
+                .padding(horizontal = 16.dp, vertical = 13.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(
                 modifier = Modifier.weight(1f)
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.ArrowForward,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = snippet.trigger,
-                        style = MaterialTheme.typography.titleMedium,
-                        color = if (snippet.isEnabled) {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        } else {
-                            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                        }
-                    )
-                }
+                Text(
+                    text = snippet.trigger,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
 
                 Spacer(modifier = Modifier.height(4.dp))
 
@@ -308,11 +304,7 @@ fun SnippetItem(
                     style = MaterialTheme.typography.bodyMedium,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
-                    color = if (snippet.isEnabled) {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    } else {
-                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                    }
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 

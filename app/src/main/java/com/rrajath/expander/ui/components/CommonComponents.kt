@@ -1,6 +1,7 @@
 package com.rrajath.expander.ui.components
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
@@ -40,6 +41,7 @@ fun SearchBar(
                 }
             }
         },
+        shape = RoundedCornerShape(16.dp),
         singleLine = true,
         colors = OutlinedTextFieldDefaults.colors()
     )
