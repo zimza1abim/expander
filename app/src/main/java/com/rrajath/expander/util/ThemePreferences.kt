@@ -32,6 +32,7 @@ object ThemePreferences {
     val themeMode: StateFlow<ThemeMode> = _themeMode.asStateFlow()
 
     fun init(context: Context) {
+        migratePopupTheme(context)
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val savedTheme = prefs.getString(KEY_THEME_MODE, ThemeMode.SYSTEM.name) ?: ThemeMode.SYSTEM.name
         _themeMode.value = ThemeMode.fromString(savedTheme)
@@ -46,8 +47,17 @@ object ThemePreferences {
     }
 
     fun getThemeMode(context: Context): ThemeMode {
+        migratePopupTheme(context)
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val savedTheme = prefs.getString(KEY_THEME_MODE, ThemeMode.SYSTEM.name) ?: ThemeMode.SYSTEM.name
         return ThemeMode.fromString(savedTheme)
+    }
+
+    private fun migratePopupTheme(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (prefs.contains(KEY_THEME_MODE)) return
+        val legacy = context.getSharedPreferences("expander_prefs", Context.MODE_PRIVATE)
+            .getString("suggestion_color_mode", "AUTO")
+        prefs.edit().putString(KEY_THEME_MODE, ThemeMode.fromString(legacy.orEmpty()).name).apply()
     }
 }

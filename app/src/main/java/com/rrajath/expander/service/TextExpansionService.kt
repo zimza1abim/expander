@@ -2,15 +2,20 @@ package com.rrajath.expander.service
 
 import android.accessibilityservice.AccessibilityService
 import android.content.Context
+import android.content.BroadcastReceiver
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.graphics.Rect
 import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import android.view.WindowInsets
-import android.view.WindowManager
+import android.view.accessibility.AccessibilityWindowInfo
 import com.rrajath.expander.data.AppDatabase
 import com.rrajath.expander.data.Snippet
 import com.rrajath.expander.data.SnippetRepository
+import com.rrajath.expander.util.ThemeMode
+import com.rrajath.expander.util.ThemePreferences
 import kotlinx.coroutines.*
 
 class TextExpansionService : AccessibilityService() {
@@ -19,10 +24,18 @@ class TextExpansionService : AccessibilityService() {
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     private var snippetsCache: List<Snippet> = emptyList()
-    private var lastProcessedText = ""
+    private var rankedSuggestions: List<Snippet> = emptyList()
     private lateinit var suggestionOverlay: SnippetSuggestionOverlay
     private var suggestionTarget: SuggestionTarget? = null
     private var activeWindowCheck: Job? = null
+    private var transitionCheck: Job? = null
+    private var keyboardWasVisible = false
+    private val preferencesListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+        serviceScope.launch { dismissSuggestions() }
+    }
+    private val screenOffReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) { dismissSuggestions() }
+    }
 
     // Undo tracking
     private var lastExpansion: ExpansionHistory? = null
@@ -35,7 +48,9 @@ class TextExpansionService : AccessibilityService() {
 
     private data class SuggestionTarget(
         val node: AccessibilityNodeInfo,
-        val token: TypedToken
+        val token: TypedToken,
+        val text: String,
+        val matches: List<Snippet>
     )
 
     companion object {
@@ -47,7 +62,7 @@ class TextExpansionService : AccessibilityService() {
         private const val KEY_PARTIAL_SUGGESTIONS_MIN_LENGTH = "partial_suggestions_min_length"
         private const val KEY_PARTIAL_SUGGESTIONS_MAX_RESULTS = "partial_suggestions_max_results"
         private const val KEY_SUGGESTION_MENU_LAYOUT = "suggestion_menu_layout"
-        private const val KEY_SUGGESTION_COLOR_MODE = "suggestion_color_mode"
+        private const val KEY_RESULT_COLOR = "suggestion_result_color"
 
         const val DEFAULT_PARTIAL_SUGGESTIONS_MIN_LENGTH = 3
         const val DEFAULT_PARTIAL_SUGGESTIONS_MAX_RESULTS = 5
@@ -137,15 +152,20 @@ class TextExpansionService : AccessibilityService() {
         }
 
         fun getSuggestionColorMode(context: Context): SuggestionColorMode {
-            val stored = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .getString(KEY_SUGGESTION_COLOR_MODE, SuggestionColorMode.AUTO.name)
-            return runCatching { SuggestionColorMode.valueOf(stored ?: "") }
-                .getOrDefault(SuggestionColorMode.AUTO)
+            return when (ThemePreferences.getThemeMode(context)) {
+                ThemeMode.LIGHT -> SuggestionColorMode.LIGHT
+                ThemeMode.DARK -> SuggestionColorMode.DARK
+                ThemeMode.SYSTEM -> SuggestionColorMode.AUTO
+            }
         }
 
-        fun setSuggestionColorMode(context: Context, mode: SuggestionColorMode) {
+        fun getSuggestionResultColor(context: Context): SuggestionResultColor =
+            SuggestionResultColor.fromStored(context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString(KEY_RESULT_COLOR, null))
+
+        fun setSuggestionResultColor(context: Context, color: SuggestionResultColor) {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
-                .putString(KEY_SUGGESTION_COLOR_MODE, mode.name).apply()
+                .putString(KEY_RESULT_COLOR, color.name).apply()
         }
 
         /** Parses the raw space-separated string into single-character tokens, ignoring the rest. */
@@ -175,11 +195,18 @@ class TextExpansionService : AccessibilityService() {
         val database = AppDatabase.getDatabase(applicationContext)
         repository = SnippetRepository(database.snippetDao())
         suggestionOverlay = SnippetSuggestionOverlay(this, ::insertSuggestion)
+        ThemePreferences.init(this)
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).registerOnSharedPreferenceChangeListener(preferencesListener)
+        getSharedPreferences("theme_prefs", Context.MODE_PRIVATE).registerOnSharedPreferenceChangeListener(preferencesListener)
+        registerReceiver(screenOffReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF), Context.RECEIVER_NOT_EXPORTED)
 
         // Load snippets into cache
         serviceScope.launch {
             repository.getEnabledSnippets().collect { snippets ->
                 snippetsCache = snippets
+                rankedSuggestions = SnippetSuggestionMatcher.ranked(snippets)
+                // Invalidate a visible candidate if it was edited or disabled.
+                dismissSuggestions()
             }
         }
     }
@@ -198,7 +225,27 @@ class TextExpansionService : AccessibilityService() {
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
         ) {
-            verifySuggestionWindowAfterTransition()
+            if (suggestionTarget != null && transitionCheck?.isActive != true) {
+                transitionCheck = serviceScope.launch {
+                    delay(120)
+                    validateSuggestionTarget()
+                }
+            }
+            return
+        }
+
+        if (event.eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED ||
+            event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED) {
+            val target = suggestionTarget ?: return
+            if (!target.node.refresh() || !target.node.isFocused ||
+                target.node.textSelectionStart != target.node.textSelectionEnd) {
+                dismissSuggestions()
+            } else if (event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED) {
+                val text = target.node.text?.toString().orEmpty()
+                val token = SnippetSuggestionMatcher.tokenAtCursor(text, target.node.textSelectionStart)
+                // Selection may arrive before the corresponding typing event.
+                if (text == target.text && token != target.token) dismissSuggestions()
+            }
             return
         }
 
@@ -208,12 +255,13 @@ class TextExpansionService : AccessibilityService() {
         val source = event.source ?: return
 
         try {
+            // Keyboard candidate labels and background fields also emit text events.
+            if (!source.isEditable || !source.isFocused || source.isPassword) return
             val currentText = source.text?.toString() ?: ""
 
             // Check for backspace undo
             if (shouldUndoExpansion(currentText)) {
                 undoExpansion(source)
-                lastProcessedText = currentText
                 return
             }
 
@@ -247,7 +295,6 @@ class TextExpansionService : AccessibilityService() {
                 }
             }
 
-            lastProcessedText = currentText
         } catch (e: Exception) {
             // Silently handle errors to avoid service crashes
         } finally {
@@ -256,20 +303,22 @@ class TextExpansionService : AccessibilityService() {
     }
 
     private fun updateSuggestions(source: AccessibilityNodeInfo, text: String) {
-        if (!arePartialSuggestionsEnabled(this) || !source.isEditable) {
+        if (!arePartialSuggestionsEnabled(this) || !source.isEditable || !source.isFocused || !source.isVisibleToUser ||
+            source.isPassword || source.textSelectionStart != source.textSelectionEnd) {
             dismissSuggestions()
             return
         }
 
-        val cursor = source.textSelectionStart.takeIf { it in 0..text.length } ?: text.length
+        val cursor = source.textSelectionStart.takeIf { it in 0..text.length }
+            ?: run { dismissSuggestions(); return }
         val token = SnippetSuggestionMatcher.tokenAtCursor(text, cursor)
         if (token == null) {
             dismissSuggestions()
             return
         }
 
-        val matches = SnippetSuggestionMatcher.find(
-            snippets = snippetsCache,
+        val matches = SnippetSuggestionMatcher.findRanked(
+            snippets = rankedSuggestions,
             token = token.value,
             minimumLength = getPartialSuggestionsMinLength(this),
             maximumResults = getPartialSuggestionsMaxResults(this)
@@ -279,46 +328,89 @@ class TextExpansionService : AccessibilityService() {
             return
         }
 
-        replaceSuggestionTarget(AccessibilityNodeInfo.obtain(source), token)
+        replaceSuggestionTarget(AccessibilityNodeInfo.obtain(source), token, matches)
         val bounds = Rect().also(source::getBoundsInScreen)
         suggestionOverlay.show(
             matches,
             bounds,
             getSuggestionMenuLayout(this),
-            getSuggestionColorMode(this)
+            getSuggestionColorMode(this),
+            visibleKeyboardTop(),
+            getSuggestionResultColor(this)
         )
+        if (!suggestionOverlay.isShowing) { dismissSuggestions(); return }
+        verifySuggestionWindowAfterTransition()
+    }
+
+    private fun visibleKeyboardTop(visibleWindows: List<AccessibilityWindowInfo> = windows): Int? {
+        var top: Int? = null
+        val bounds = Rect()
+        for (window in visibleWindows) {
+            if (window.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
+            window.getBoundsInScreen(bounds)
+            if (!bounds.isEmpty) top = minOf(top ?: bounds.top, bounds.top)
+        }
+        return top
     }
 
     private fun verifySuggestionWindowAfterTransition() {
-        if (suggestionTarget == null) return
-        activeWindowCheck?.cancel()
+        if (suggestionTarget == null || activeWindowCheck?.isActive == true) return
+        keyboardWasVisible = visibleKeyboardTop() != null
         activeWindowCheck = serviceScope.launch {
-            // Let Android finish replacing the active window before comparing IDs.
-            delay(150)
-            val target = suggestionTarget ?: return@launch
-            val insets = getSystemService(WindowManager::class.java)
-                .currentWindowMetrics.windowInsets
-            if (!insets.isVisible(WindowInsets.Type.ime())) {
+          // A bounded-lifetime observer: only alive while the picker has a target.
+          // Overlay-generated window events must not restart this timer indefinitely.
+          while (isActive && suggestionTarget != null) {
+            delay(500)
+            validateSuggestionTarget()
+          }
+        }
+    }
+
+    private fun validateSuggestionTarget() {
+        try {
+            val target = suggestionTarget ?: return
+            val visibleWindows = windows
+            val keyboardTop = visibleKeyboardTop(visibleWindows)
+            if (keyboardTop != null) keyboardWasVisible = true
+            val activeApplication = visibleWindows.firstOrNull {
+                it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive
+            }
+            if (!isServiceEnabled(this@TextExpansionService) ||
+                !arePartialSuggestionsEnabled(this@TextExpansionService) ||
+                (keyboardWasVisible && keyboardTop == null) ||
+                !target.node.refresh() || !target.node.isFocused || !target.node.isVisibleToUser ||
+                (activeApplication != null && activeApplication.id != target.node.windowId)) {
                 dismissSuggestions()
-                return@launch
+                return
             }
-            val activeRoot = rootInActiveWindow ?: return@launch
-            try {
-                if (activeRoot.windowId != target.node.windowId) {
-                    dismissSuggestions()
-                }
-            } finally {
-                activeRoot.recycle()
+            // Follow a field that moves when the keyboard resizes or the app scrolls.
+            if (target.node.text?.toString() == target.text) {
+                val bounds = Rect().also(target.node::getBoundsInScreen)
+                suggestionOverlay.show(target.matches, bounds,
+                    getSuggestionMenuLayout(this@TextExpansionService),
+                    getSuggestionColorMode(this@TextExpansionService), keyboardTop,
+                    getSuggestionResultColor(this))
+                if (!suggestionOverlay.isShowing) dismissSuggestions()
             }
+        } catch (_: Exception) {
+            // A target can disappear between a window snapshot and a node refresh.
+            dismissSuggestions()
         }
     }
 
     private fun insertSuggestion(snippet: Snippet) {
         val target = suggestionTarget ?: return
+        activeWindowCheck?.cancel()
+        activeWindowCheck = null
+        transitionCheck?.cancel()
+        transitionCheck = null
         suggestionOverlay.dismiss()
 
         try {
-            if (!target.node.refresh()) return
+            val activeApp = windows.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive }
+            if (activeApp != null && activeApp.id != target.node.windowId) return
+            if (!target.node.refresh() || !target.node.isFocused || !target.node.isVisibleToUser ||
+                target.node.textSelectionStart != target.node.textSelectionEnd) return
             val currentText = target.node.text?.toString() ?: return
             val currentToken = SnippetSuggestionMatcher.tokenAtCursor(
                 currentText,
@@ -357,9 +449,9 @@ class TextExpansionService : AccessibilityService() {
         }
     }
 
-    private fun replaceSuggestionTarget(node: AccessibilityNodeInfo, token: TypedToken) {
+    private fun replaceSuggestionTarget(node: AccessibilityNodeInfo, token: TypedToken, matches: List<Snippet>) {
         clearSuggestionTarget()
-        suggestionTarget = SuggestionTarget(node, token)
+        suggestionTarget = SuggestionTarget(node, token, node.text?.toString().orEmpty(), matches)
     }
 
     private fun clearSuggestionTarget() {
@@ -368,8 +460,11 @@ class TextExpansionService : AccessibilityService() {
     }
 
     private fun dismissSuggestions() {
+        transitionCheck?.cancel()
+        transitionCheck = null
         activeWindowCheck?.cancel()
         activeWindowCheck = null
+        keyboardWasVisible = false
         if (::suggestionOverlay.isInitialized) suggestionOverlay.dismiss()
         clearSuggestionTarget()
     }
@@ -504,6 +599,9 @@ class TextExpansionService : AccessibilityService() {
 
     override fun onDestroy() {
         dismissSuggestions()
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).unregisterOnSharedPreferenceChangeListener(preferencesListener)
+        getSharedPreferences("theme_prefs", Context.MODE_PRIVATE).unregisterOnSharedPreferenceChangeListener(preferencesListener)
+        unregisterReceiver(screenOffReceiver)
         super.onDestroy()
         serviceScope.cancel()
     }

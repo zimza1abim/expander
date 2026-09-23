@@ -4,6 +4,10 @@ import android.content.Context
 import android.content.Intent
 import android.provider.Settings
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -11,16 +15,18 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.rrajath.expander.service.TextExpansionService
 import com.rrajath.expander.service.SuggestionMenuLayout
-import com.rrajath.expander.service.SuggestionColorMode
+import com.rrajath.expander.service.SuggestionResultColor
 import com.rrajath.expander.util.ThemeMode
 import com.rrajath.expander.util.ThemePreferences
 
@@ -43,7 +49,7 @@ fun SettingsScreen(
     var useHorizontalSuggestionMenu by remember {
         mutableStateOf(TextExpansionService.getSuggestionMenuLayout(context) == SuggestionMenuLayout.HORIZONTAL)
     }
-    var suggestionColorMode by remember { mutableStateOf(TextExpansionService.getSuggestionColorMode(context)) }
+    var resultColor by remember { mutableStateOf(TextExpansionService.getSuggestionResultColor(context)) }
     var currentTheme by remember { mutableStateOf(ThemePreferences.getThemeMode(context)) }
     var showThemeDialog by remember { mutableStateOf(false) }
 
@@ -234,26 +240,22 @@ fun SettingsScreen(
                         ) { Text("Horizontal bar") }
                     }
                     Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = "Suggestion colors",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    SettingsItem(
+                        title = "App theme",
+                        subtitle = "${currentTheme.name.lowercase().replaceFirstChar { it.uppercase() }} · App and suggestion menu",
+                        onClick = { showThemeDialog = true }
                     )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        SuggestionColorOption("Auto", suggestionColorMode == SuggestionColorMode.AUTO, partialSuggestionsEnabled) {
-                            suggestionColorMode = SuggestionColorMode.AUTO
-                            TextExpansionService.setSuggestionColorMode(context, suggestionColorMode)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    ResultColorPicker(
+                        selected = resultColor,
+                        enabled = partialSuggestionsEnabled,
+                        dark = currentTheme == ThemeMode.DARK ||
+                            (currentTheme == ThemeMode.SYSTEM && isSystemInDarkTheme()),
+                        onSelected = {
+                            resultColor = it
+                            TextExpansionService.setSuggestionResultColor(context, it)
                         }
-                        SuggestionColorOption("Dark", suggestionColorMode == SuggestionColorMode.DARK, partialSuggestionsEnabled) {
-                            suggestionColorMode = SuggestionColorMode.DARK
-                            TextExpansionService.setSuggestionColorMode(context, suggestionColorMode)
-                        }
-                        SuggestionColorOption("Light", suggestionColorMode == SuggestionColorMode.LIGHT, partialSuggestionsEnabled) {
-                            suggestionColorMode = SuggestionColorMode.LIGHT
-                            TextExpansionService.setSuggestionColorMode(context, suggestionColorMode)
-                        }
-                    }
+                    )
                 }
             }
 
@@ -314,25 +316,6 @@ fun SettingsScreen(
                     val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
                     context.startActivity(intent)
                 }
-            )
-
-            Divider()
-
-            // Appearance Section
-            Text(
-                text = "Appearance",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-
-            SettingsItem(
-                title = "Theme",
-                subtitle = when (currentTheme) {
-                    ThemeMode.LIGHT -> "Light"
-                    ThemeMode.DARK -> "Dark"
-                    ThemeMode.SYSTEM -> "System default"
-                },
-                onClick = { showThemeDialog = true }
             )
 
             Divider()
@@ -398,27 +381,6 @@ fun SettingsScreen(
 }
 
 @Composable
-private fun RowScope.SuggestionColorOption(
-    label: String,
-    selected: Boolean,
-    enabled: Boolean,
-    onClick: () -> Unit
-) {
-    OutlinedButton(
-        onClick = onClick,
-        modifier = Modifier.weight(1f),
-        enabled = enabled,
-        border = BorderStroke(
-            if (selected) 2.dp else 1.dp,
-            if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
-        ),
-        colors = ButtonDefaults.outlinedButtonColors(
-            containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
-        )
-    ) { Text(label) }
-}
-
-@Composable
 fun SettingsItem(
     title: String,
     subtitle: String,
@@ -451,6 +413,48 @@ fun SettingsItem(
 }
 
 @Composable
+private fun ResultColorPicker(
+    selected: SuggestionResultColor,
+    enabled: Boolean,
+    dark: Boolean,
+    onSelected: (SuggestionResultColor) -> Unit
+) {
+    Text("Result text color", style = MaterialTheme.typography.labelLarge)
+    Text("Applies to all suggestion previews. Triggers keep their secondary color.",
+        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Spacer(Modifier.height(8.dp))
+    SuggestionResultColor.entries.chunked(3).forEach { colors ->
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            colors.forEach { color ->
+                FilterChip(
+                    selected = color == selected,
+                    onClick = { onSelected(color) },
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f),
+                    label = { Text(color.label, maxLines = 1) },
+                    leadingIcon = {
+                        if (color == selected) Icon(Icons.Default.Check, contentDescription = "Selected", Modifier.size(16.dp))
+                        else Box(Modifier.size(12.dp).background(Color(color.argb(dark)), CircleShape))
+                    }
+                )
+            }
+        }
+    }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        color = Color(if (dark) 0xFF232326 else 0xFFF4F4F7),
+        border = BorderStroke(0.5.dp, Color(if (dark) 0xFF65656B else 0xFFC9C9D0))
+    ) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
+            Text("example.com", color = Color(selected.argb(dark)), style = MaterialTheme.typography.bodyMedium)
+            Text("email1", color = Color(if (dark) 0xFFB7B7BF else 0xFF696972),
+                style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+@Composable
 fun ThemeSelectionDialog(
     currentTheme: ThemeMode,
     onDismiss: () -> Unit,
@@ -458,7 +462,7 @@ fun ThemeSelectionDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Choose Theme") },
+        title = { Text("App theme") },
         text = {
             Column {
                 ThemeOption(

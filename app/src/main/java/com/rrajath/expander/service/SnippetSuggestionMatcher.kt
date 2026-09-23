@@ -9,6 +9,9 @@ internal data class TypedToken(
 )
 
 internal object SnippetSuggestionMatcher {
+    fun ranked(snippets: List<Snippet>): List<Snippet> = snippets.sortedWith(
+        compareBy<Snippet> { it.trigger.length }.thenBy { it.trigger.lowercase(java.util.Locale.ROOT) }
+    )
     fun tokenAtCursor(text: String, cursor: Int): TypedToken? {
         if (cursor !in 0..text.length || cursor == 0) return null
 
@@ -27,10 +30,15 @@ internal object SnippetSuggestionMatcher {
     ): List<Snippet> {
         if (token.length < minimumLength || maximumResults <= 0) return emptyList()
 
+        return findRanked(ranked(snippets), token, minimumLength, maximumResults)
+    }
+
+    /** Service ranks only when the database changes, not on every keystroke. */
+    fun findRanked(snippets: List<Snippet>, token: String, minimumLength: Int, maximumResults: Int): List<Snippet> {
+        if (token.length < minimumLength || maximumResults <= 0) return emptyList()
         return snippets.asSequence()
             .filter { it.trigger.length > token.length }
             .filter { it.trigger.startsWith(token, ignoreCase = true) }
-            .sortedWith(compareBy<Snippet> { it.trigger.length }.thenBy { it.trigger.lowercase() })
             .take(maximumResults)
             .toList()
     }

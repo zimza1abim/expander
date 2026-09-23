@@ -36,4 +36,20 @@ class SnippetSuggestionMatcherTest {
         val snippets = listOf(Snippet(trigger = "zzemail", expansion = "one"))
         assertEquals(emptyList<Snippet>(), SnippetSuggestionMatcher.find(snippets, "zz", 3, 5))
     }
+
+    @Test
+    fun `cached ranking preserves prefix-only results and limits`() {
+        val snippets = listOf(
+            Snippet(trigger = "opengpt", expansion = "not a prefix"),
+            Snippet(trigger = "gpt10", expansion = "long"),
+            Snippet(trigger = "GPT2", expansion = "second"),
+            Snippet(trigger = "gpt1", expansion = "first"),
+            Snippet(trigger = "gpt", expansion = "exact")
+        )
+        val ranked = SnippetSuggestionMatcher.ranked(snippets)
+        assertEquals(listOf("gpt1", "GPT2"),
+            SnippetSuggestionMatcher.findRanked(ranked, "gpt", 3, 2).map { it.trigger })
+        assertEquals(emptyList<Snippet>(), SnippetSuggestionMatcher.findRanked(ranked, "gp", 3, 2))
+        assertEquals(emptyList<Snippet>(), SnippetSuggestionMatcher.findRanked(ranked, "gpt", 3, 0))
+    }
 }
