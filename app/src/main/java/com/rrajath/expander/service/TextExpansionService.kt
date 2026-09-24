@@ -29,6 +29,7 @@ class TextExpansionService : AccessibilityService() {
     private var suggestionTarget: SuggestionTarget? = null
     private var activeWindowCheck: Job? = null
     private var transitionCheck: Job? = null
+    private var inputRefreshJob: Job? = null
     private var keyboardWasVisible = false
     private val preferencesListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
         serviceScope.launch { dismissSuggestions() }
@@ -63,6 +64,7 @@ class TextExpansionService : AccessibilityService() {
         private const val KEY_PARTIAL_SUGGESTIONS_MAX_RESULTS = "partial_suggestions_max_results"
         private const val KEY_SUGGESTION_MENU_LAYOUT = "suggestion_menu_layout"
         private const val KEY_RESULT_COLOR = "suggestion_result_color"
+        private const val KEY_CUSTOM_RESULT_COLOR = "suggestion_custom_result_color"
 
         const val DEFAULT_PARTIAL_SUGGESTIONS_MIN_LENGTH = 3
         const val DEFAULT_PARTIAL_SUGGESTIONS_MAX_RESULTS = 5
@@ -168,6 +170,16 @@ class TextExpansionService : AccessibilityService() {
                 .putString(KEY_RESULT_COLOR, color.name).apply()
         }
 
+        fun getCustomResultColor(context: Context): Int =
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getInt(KEY_CUSTOM_RESULT_COLOR, 0xFF185ABD.toInt()) or 0xFF000000.toInt()
+
+        fun setCustomResultColor(context: Context, color: Int) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                .putInt(KEY_CUSTOM_RESULT_COLOR, color or 0xFF000000.toInt())
+                .putString(KEY_RESULT_COLOR, SuggestionResultColor.CUSTOM.name).apply()
+        }
+
         /** Parses the raw space-separated string into single-character tokens, ignoring the rest. */
         fun parseSmartPunctuationChars(raw: String): Set<Char> {
             return raw.split(" ", "\t", "\n")
@@ -237,8 +249,12 @@ class TextExpansionService : AccessibilityService() {
         if (event.eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED ||
             event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED) {
             val target = suggestionTarget ?: return
-            if (!target.node.refresh() || !target.node.isFocused ||
-                target.node.textSelectionStart != target.node.textSelectionEnd) {
+            if (!target.node.refresh() || !target.node.isFocused) {
+                dismissSuggestions()
+            } else if (inputRefreshJob?.isActive == true) {
+                // A queued selection event can still contain the cursor from before typing.
+                return
+            } else if (target.node.textSelectionStart != target.node.textSelectionEnd) {
                 dismissSuggestions()
             } else if (event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED) {
                 val text = target.node.text?.toString().orEmpty()
@@ -257,7 +273,13 @@ class TextExpansionService : AccessibilityService() {
         try {
             // Keyboard candidate labels and background fields also emit text events.
             if (!source.isEditable || !source.isFocused || source.isPassword) return
-            val currentText = source.text?.toString() ?: ""
+            inputRefreshJob?.cancel()
+            inputRefreshJob = null
+            val nodeText = source.text?.toString().orEmpty()
+            val eventText = event.text.firstOrNull()?.toString()
+            val before = event.beforeText?.toString()
+            val currentText = if (eventText != null && (nodeText == before || nodeText == eventText) && SuggestionInputCursor.changeEnd(eventText,
+                    before, event.fromIndex, event.addedCount, event.removedCount) != null) eventText else nodeText
 
             // Check for backspace undo
             if (shouldUndoExpansion(currentText)) {
@@ -281,7 +303,13 @@ class TextExpansionService : AccessibilityService() {
                     }
                 }
 
-                else -> updateSuggestions(source, currentText)
+                else -> {
+                    val cursor = SuggestionInputCursor.resolve(currentText, event.beforeText?.toString(),
+                        event.fromIndex, event.addedCount, event.removedCount,
+                        source.textSelectionStart, source.textSelectionEnd)
+                    updateSuggestions(source, currentText, cursor)
+                    scheduleInputRefresh(source, currentText)
+                }
             }
 
             // Once the user edits past the freshly-inserted expansion, the undo
@@ -302,18 +330,42 @@ class TextExpansionService : AccessibilityService() {
         }
     }
 
-    private fun updateSuggestions(source: AccessibilityNodeInfo, text: String) {
+    private fun scheduleInputRefresh(source: AccessibilityNodeInfo, expectedText: String) {
+        if (!arePartialSuggestionsEnabled(this)) return
+        val node = AccessibilityNodeInfo.obtain(source)
+        // Two bounded retries cover composing IMEs; never a persistent typing timer.
+        inputRefreshJob = serviceScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                for (pause in listOf(60L, 120L)) {
+                    delay(pause)
+                    if (!node.refresh() || !node.isFocused || !node.isVisibleToUser ||
+                        node.text?.toString() != expectedText || visibleKeyboardTop() == null) return@launch
+                    val activeApp = windows.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive }
+                    if (activeApp != null && activeApp.id != node.windowId) return@launch
+                    updateSuggestions(node, expectedText)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                dismissSuggestions()
+            } finally {
+                node.recycle()
+            }
+        }
+    }
+
+    private fun updateSuggestions(source: AccessibilityNodeInfo, text: String, cursorOverride: Int? = null) {
         if (!arePartialSuggestionsEnabled(this) || !source.isEditable || !source.isFocused || !source.isVisibleToUser ||
-            source.isPassword || source.textSelectionStart != source.textSelectionEnd) {
-            dismissSuggestions()
+            source.isPassword || (cursorOverride == null && source.textSelectionStart != source.textSelectionEnd)) {
+            dismissSuggestions(cancelPendingInput = false)
             return
         }
 
-        val cursor = source.textSelectionStart.takeIf { it in 0..text.length }
-            ?: run { dismissSuggestions(); return }
+        val cursor = cursorOverride ?: source.textSelectionStart.takeIf { it in 0..text.length }
+            ?: run { dismissSuggestions(cancelPendingInput = false); return }
         val token = SnippetSuggestionMatcher.tokenAtCursor(text, cursor)
         if (token == null) {
-            dismissSuggestions()
+            dismissSuggestions(cancelPendingInput = false)
             return
         }
 
@@ -324,11 +376,11 @@ class TextExpansionService : AccessibilityService() {
             maximumResults = getPartialSuggestionsMaxResults(this)
         )
         if (matches.isEmpty()) {
-            dismissSuggestions()
+            dismissSuggestions(cancelPendingInput = false)
             return
         }
 
-        replaceSuggestionTarget(AccessibilityNodeInfo.obtain(source), token, matches)
+        replaceSuggestionTarget(AccessibilityNodeInfo.obtain(source), token, matches, text)
         val bounds = Rect().also(source::getBoundsInScreen)
         suggestionOverlay.show(
             matches,
@@ -336,7 +388,8 @@ class TextExpansionService : AccessibilityService() {
             getSuggestionMenuLayout(this),
             getSuggestionColorMode(this),
             visibleKeyboardTop(),
-            getSuggestionResultColor(this)
+            getSuggestionResultColor(this),
+            getCustomResultColor(this)
         )
         if (!suggestionOverlay.isShowing) { dismissSuggestions(); return }
         verifySuggestionWindowAfterTransition()
@@ -389,7 +442,7 @@ class TextExpansionService : AccessibilityService() {
                 suggestionOverlay.show(target.matches, bounds,
                     getSuggestionMenuLayout(this@TextExpansionService),
                     getSuggestionColorMode(this@TextExpansionService), keyboardTop,
-                    getSuggestionResultColor(this))
+                    getSuggestionResultColor(this), getCustomResultColor(this))
                 if (!suggestionOverlay.isShowing) dismissSuggestions()
             }
         } catch (_: Exception) {
@@ -400,6 +453,8 @@ class TextExpansionService : AccessibilityService() {
 
     private fun insertSuggestion(snippet: Snippet) {
         val target = suggestionTarget ?: return
+        inputRefreshJob?.cancel()
+        inputRefreshJob = null
         activeWindowCheck?.cancel()
         activeWindowCheck = null
         transitionCheck?.cancel()
@@ -449,9 +504,9 @@ class TextExpansionService : AccessibilityService() {
         }
     }
 
-    private fun replaceSuggestionTarget(node: AccessibilityNodeInfo, token: TypedToken, matches: List<Snippet>) {
+    private fun replaceSuggestionTarget(node: AccessibilityNodeInfo, token: TypedToken, matches: List<Snippet>, text: String) {
         clearSuggestionTarget()
-        suggestionTarget = SuggestionTarget(node, token, node.text?.toString().orEmpty(), matches)
+        suggestionTarget = SuggestionTarget(node, token, text, matches)
     }
 
     private fun clearSuggestionTarget() {
@@ -459,7 +514,11 @@ class TextExpansionService : AccessibilityService() {
         suggestionTarget = null
     }
 
-    private fun dismissSuggestions() {
+    private fun dismissSuggestions(cancelPendingInput: Boolean = true) {
+        if (cancelPendingInput) {
+            inputRefreshJob?.cancel()
+            inputRefreshJob = null
+        }
         transitionCheck?.cancel()
         transitionCheck = null
         activeWindowCheck?.cancel()

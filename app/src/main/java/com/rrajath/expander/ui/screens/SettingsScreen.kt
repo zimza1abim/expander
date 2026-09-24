@@ -18,10 +18,13 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.rrajath.expander.service.TextExpansionService
@@ -50,6 +53,7 @@ fun SettingsScreen(
         mutableStateOf(TextExpansionService.getSuggestionMenuLayout(context) == SuggestionMenuLayout.HORIZONTAL)
     }
     var resultColor by remember { mutableStateOf(TextExpansionService.getSuggestionResultColor(context)) }
+    var customResultColor by remember { mutableIntStateOf(TextExpansionService.getCustomResultColor(context)) }
     var currentTheme by remember { mutableStateOf(ThemePreferences.getThemeMode(context)) }
     var showThemeDialog by remember { mutableStateOf(false) }
 
@@ -248,12 +252,18 @@ fun SettingsScreen(
                     Spacer(modifier = Modifier.height(12.dp))
                     ResultColorPicker(
                         selected = resultColor,
+                        customColor = customResultColor,
                         enabled = partialSuggestionsEnabled,
                         dark = currentTheme == ThemeMode.DARK ||
                             (currentTheme == ThemeMode.SYSTEM && isSystemInDarkTheme()),
                         onSelected = {
                             resultColor = it
                             TextExpansionService.setSuggestionResultColor(context, it)
+                        },
+                        onCustomColor = {
+                            customResultColor = it
+                            resultColor = SuggestionResultColor.CUSTOM
+                            TextExpansionService.setCustomResultColor(context, it)
                         }
                     )
                 }
@@ -415,15 +425,19 @@ fun SettingsItem(
 @Composable
 private fun ResultColorPicker(
     selected: SuggestionResultColor,
+    customColor: Int,
     enabled: Boolean,
     dark: Boolean,
-    onSelected: (SuggestionResultColor) -> Unit
+    onSelected: (SuggestionResultColor) -> Unit,
+    onCustomColor: (Int) -> Unit
 ) {
+    var draftColor by rememberSaveable(customColor) { mutableIntStateOf(customColor) }
+    val previewInk = if (selected == SuggestionResultColor.CUSTOM) draftColor else selected.argb(dark)
     Text("Result text color", style = MaterialTheme.typography.labelLarge)
     Text("Applies to all suggestion previews. Triggers keep their secondary color.",
         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     Spacer(Modifier.height(8.dp))
-    SuggestionResultColor.entries.chunked(3).forEach { colors ->
+    SuggestionResultColor.entries.filter { it != SuggestionResultColor.CUSTOM }.chunked(3).forEach { colors ->
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             colors.forEach { color ->
                 FilterChip(
@@ -440,6 +454,35 @@ private fun ResultColorPicker(
             }
         }
     }
+    FilterChip(
+        selected = selected == SuggestionResultColor.CUSTOM,
+        onClick = { onSelected(SuggestionResultColor.CUSTOM) },
+        enabled = enabled,
+        label = { Text("Color wheel") },
+        leadingIcon = {
+            if (selected == SuggestionResultColor.CUSTOM) Icon(Icons.Default.Check, "Selected", Modifier.size(16.dp))
+            else Box(Modifier.size(12.dp).background(Color(customColor), CircleShape))
+        }
+    )
+    if (selected == SuggestionResultColor.CUSTOM) {
+        ColorWheelPicker(initialColor = customColor, enabled = enabled, onColorChange = { draftColor = it })
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Surface(Modifier.size(28.dp).semantics { contentDescription = "Selected color" },
+                shape = RoundedCornerShape(8.dp), color = Color(draftColor),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {}
+            Text(SuggestionResultColor.formatHex(draftColor), modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodyMedium)
+            Button(onClick = { onCustomColor(draftColor) }, enabled = enabled) {
+                Text("Apply")
+            }
+        }
+        if (androidx.core.graphics.ColorUtils.calculateContrast(draftColor,
+                if (dark) 0xFF232326.toInt() else 0xFFF4F4F7.toInt()) < 4.5) {
+            Text("Low contrast on this theme. A darker or lighter color will be easier to read.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
+        Spacer(Modifier.height(8.dp))
+    }
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
@@ -447,7 +490,7 @@ private fun ResultColorPicker(
         border = BorderStroke(0.5.dp, Color(if (dark) 0xFF65656B else 0xFFC9C9D0))
     ) {
         Column(Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
-            Text("example.com", color = Color(selected.argb(dark)), style = MaterialTheme.typography.bodyMedium)
+            Text("example.com", color = Color(previewInk), style = MaterialTheme.typography.bodyMedium)
             Text("email1", color = Color(if (dark) 0xFFB7B7BF else 0xFF696972),
                 style = MaterialTheme.typography.labelSmall)
         }

@@ -15,7 +15,7 @@ class SuggestionResultColorTest {
     }
 
     @Test fun resultColorsAreReadableAcrossBothSurfaceGradients() {
-        for (color in SuggestionResultColor.entries) {
+        for (color in SuggestionResultColor.entries.filter { it != SuggestionResultColor.CUSTOM }) {
             for (dark in listOf(false, true)) {
                 val surfaces = if (dark) listOf(0xFF2F2F32.toInt(), 0xFF232326.toInt())
                     else listOf(0xFFFFFFFF.toInt(), 0xFFF4F4F7.toInt())
@@ -27,6 +27,15 @@ class SuggestionResultColorTest {
                     assertTrue("${color.name}, dark=$dark: $contrast", contrast >= 4.5)
                 }
             }
+        }
+    }
+
+    @Test fun customHexAcceptsRgbAndRejectsInvalidOrTransparentValues() {
+        assertEquals(0xFFAABBCC.toInt(), SuggestionResultColor.parseHex(" #abc "))
+        assertEquals(0xFF3A86FF.toInt(), SuggestionResultColor.parseHex("3a86ff"))
+        assertEquals("#3A86FF", SuggestionResultColor.formatHex(0xFF3A86FF.toInt()))
+        for (invalid in listOf("", "#12", "#GGGGGG", "#803A86FF", "##123456")) {
+            assertEquals(null, SuggestionResultColor.parseHex(invalid))
         }
     }
 

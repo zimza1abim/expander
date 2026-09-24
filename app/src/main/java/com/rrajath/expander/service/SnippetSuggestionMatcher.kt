@@ -37,7 +37,6 @@ internal object SnippetSuggestionMatcher {
     fun findRanked(snippets: List<Snippet>, token: String, minimumLength: Int, maximumResults: Int): List<Snippet> {
         if (token.length < minimumLength || maximumResults <= 0) return emptyList()
         return snippets.asSequence()
-            .filter { it.trigger.length > token.length }
             .filter { it.trigger.startsWith(token, ignoreCase = true) }
             .take(maximumResults)
             .toList()

@@ -33,7 +33,7 @@ internal class SnippetSuggestionOverlay(
     private val windowManager = service.getSystemService(WindowManager::class.java)
     private var view: View? = null
     private data class ContentKey(val snippets: List<Snippet>, val layout: SuggestionMenuLayout,
-        val dark: Boolean, val ink: SuggestionResultColor, val width: Int, val fontScale: Float, val density: Float)
+        val dark: Boolean, val ink: Int, val width: Int, val fontScale: Float, val density: Float)
     private var contentKey: ContentKey? = null
     private var lastAnchor: Rect? = null
     private var lastSafeBounds: Rect? = null
@@ -49,7 +49,8 @@ internal class SnippetSuggestionOverlay(
         layout: SuggestionMenuLayout,
         colorMode: SuggestionColorMode,
         keyboardTop: Int? = null,
-        resultColor: SuggestionResultColor = SuggestionResultColor.DEFAULT
+        resultColor: SuggestionResultColor = SuggestionResultColor.DEFAULT,
+        customResultColor: Int = 0xFF185ABD.toInt()
     ) {
         if (snippets.isEmpty()) { dismiss(); return }
 
@@ -64,13 +65,14 @@ internal class SnippetSuggestionOverlay(
         val safeBottom = minOf(metrics.bounds.height() - insets.bottom, keyboardTop ?: Int.MAX_VALUE) - dp(8)
         if (safeRight <= safeLeft || safeBottom - safeTop < dp(48)) { dismiss(); return }
         val listWidth = minOf(dp(256), safeRight - safeLeft)
-        // The rail deliberately spans the available screen width like an address bar.
-        val railWidth = safeRight - safeLeft
-        val width = if (layout == SuggestionMenuLayout.LIST) listWidth else railWidth
+        // Keep the rail stable while typing; only narrow screens reduce its width.
+        val railWidth = minOf(safeRight - safeLeft, dp(320))
+        val widthLimit = if (layout == SuggestionMenuLayout.LIST) listWidth else railWidth
         val dark = colorMode == SuggestionColorMode.DARK ||
             (colorMode == SuggestionColorMode.AUTO && service.resources.configuration.uiMode and
                 Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES)
-        val key = ContentKey(snippets, layout, dark, resultColor, width,
+        val ink = if (resultColor == SuggestionResultColor.CUSTOM) customResultColor else resultColor.argb(dark)
+        val key = ContentKey(snippets, layout, dark, ink, widthLimit,
             service.resources.configuration.fontScale, density)
         val safeBounds = Rect(safeLeft, safeTop, safeRight, safeBottom)
         // Watchdog calls must not measure, rebuild, or redraw an unchanged popup.
@@ -78,7 +80,7 @@ internal class SnippetSuggestionOverlay(
         val palette = paletteFor(if (dark) SuggestionColorMode.DARK else SuggestionColorMode.LIGHT)
         val surface = palette.surface
         val border = palette.border
-        val primary = resultColor.argb(dark)
+        val primary = ink
         val secondary = palette.secondary
 
         val container = if (key == contentKey && view != null) view as LinearLayout else LinearLayout(service).apply {
@@ -100,7 +102,7 @@ internal class SnippetSuggestionOverlay(
             snippets.forEachIndexed { index, snippet ->
                 rows.addView(
                     listItem(snippet, primary, secondary, ::dp),
-                    LinearLayout.LayoutParams(width, LinearLayout.LayoutParams.WRAP_CONTENT)
+                    LinearLayout.LayoutParams(widthLimit, LinearLayout.LayoutParams.WRAP_CONTENT)
                 )
                 if (index < snippets.lastIndex) {
                     rows.addView(View(service).apply {
@@ -142,15 +144,16 @@ internal class SnippetSuggestionOverlay(
                 addView(cards)
                 isHorizontalFadingEdgeEnabled = true
                 setFadingEdgeLength(dp(16))
-            }, LinearLayout.LayoutParams(width, LinearLayout.LayoutParams.WRAP_CONTENT))
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         }
         }
 
         if (key != contentKey || view == null) {
-            container.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+            container.measure(View.MeasureSpec.makeMeasureSpec(widthLimit, View.MeasureSpec.EXACTLY),
                 View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
             measuredContentHeight = container.measuredHeight.coerceAtLeast(dp(48))
         }
+        val width = widthLimit
         val desiredHeight = measuredContentHeight
         val below = (safeBottom - anchor.bottom - dp(6)).coerceAtLeast(0)
         val above = (anchor.top - dp(6) - safeTop).coerceAtLeast(0)

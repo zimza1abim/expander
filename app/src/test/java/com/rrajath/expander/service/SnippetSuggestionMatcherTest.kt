@@ -17,7 +17,7 @@ class SnippetSuggestionMatcherTest {
     }
 
     @Test
-    fun `prefix matches exclude exact trigger and respect limit`() {
+    fun `prefix matches include exact trigger and respect limit`() {
         val snippets = listOf(
             Snippet(trigger = "zzemail-long", expansion = "three"),
             Snippet(trigger = "zzemail2", expansion = "two"),
@@ -26,7 +26,7 @@ class SnippetSuggestionMatcherTest {
         )
 
         assertEquals(
-            listOf("zzemail1", "zzemail2"),
+            listOf("zzema", "zzemail1"),
             SnippetSuggestionMatcher.find(snippets, "ZZEMA", 3, 2).map { it.trigger }
         )
     }
@@ -47,7 +47,7 @@ class SnippetSuggestionMatcherTest {
             Snippet(trigger = "gpt", expansion = "exact")
         )
         val ranked = SnippetSuggestionMatcher.ranked(snippets)
-        assertEquals(listOf("gpt1", "GPT2"),
+        assertEquals(listOf("gpt", "gpt1"),
             SnippetSuggestionMatcher.findRanked(ranked, "gpt", 3, 2).map { it.trigger })
         assertEquals(emptyList<Snippet>(), SnippetSuggestionMatcher.findRanked(ranked, "gp", 3, 2))
         assertEquals(emptyList<Snippet>(), SnippetSuggestionMatcher.findRanked(ranked, "gpt", 3, 0))
