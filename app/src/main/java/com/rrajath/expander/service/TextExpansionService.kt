@@ -339,9 +339,16 @@ class TextExpansionService : AccessibilityService() {
                 for (pause in listOf(60L, 120L)) {
                     delay(pause)
                     if (!node.refresh() || !node.isFocused || !node.isVisibleToUser ||
-                        node.text?.toString() != expectedText || visibleKeyboardTop() == null) return@launch
-                    val activeApp = windows.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive }
+                        node.text?.toString() != expectedText) return@launch
+                    // One window snapshot per retry: fetching it is a binder call.
+                    val snapshot = windows
+                    val activeApp = snapshot.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive }
                     if (activeApp != null && activeApp.id != node.windowId) return@launch
+                    // Some apps update the accessibility window list (which reports the
+                    // IME) slower than our retry cadence. A momentarily-undetected
+                    // keyboard is not proof the user left the field, so keep retrying
+                    // instead of giving up on the whole sequence.
+                    if (visibleKeyboardTop(snapshot) == null) continue
                     updateSuggestions(node, expectedText)
                 }
             } catch (e: CancellationException) {
@@ -389,7 +396,8 @@ class TextExpansionService : AccessibilityService() {
             getSuggestionColorMode(this),
             visibleKeyboardTop(),
             getSuggestionResultColor(this),
-            getCustomResultColor(this)
+            getCustomResultColor(this),
+            token.value
         )
         if (!suggestionOverlay.isShowing) { dismissSuggestions(); return }
         verifySuggestionWindowAfterTransition()
@@ -413,7 +421,7 @@ class TextExpansionService : AccessibilityService() {
           // A bounded-lifetime observer: only alive while the picker has a target.
           // Overlay-generated window events must not restart this timer indefinitely.
           while (isActive && suggestionTarget != null) {
-            delay(500)
+            delay(700)
             validateSuggestionTarget()
           }
         }
@@ -442,7 +450,7 @@ class TextExpansionService : AccessibilityService() {
                 suggestionOverlay.show(target.matches, bounds,
                     getSuggestionMenuLayout(this@TextExpansionService),
                     getSuggestionColorMode(this@TextExpansionService), keyboardTop,
-                    getSuggestionResultColor(this), getCustomResultColor(this))
+                    getSuggestionResultColor(this), getCustomResultColor(this), target.token.value)
                 if (!suggestionOverlay.isShowing) dismissSuggestions()
             }
         } catch (_: Exception) {

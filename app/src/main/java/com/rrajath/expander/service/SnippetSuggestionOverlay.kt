@@ -11,9 +11,9 @@ import android.graphics.drawable.RippleDrawable
 import android.text.SpannableString
 import android.text.Spanned
 import android.text.TextUtils
-import android.animation.ValueAnimator
 import android.text.style.ForegroundColorSpan
-import android.text.style.RelativeSizeSpan
+import android.text.style.StyleSpan
+import android.animation.ValueAnimator
 import android.view.Gravity
 import android.view.View
 import android.view.WindowInsets
@@ -33,7 +33,7 @@ internal class SnippetSuggestionOverlay(
     private val windowManager = service.getSystemService(WindowManager::class.java)
     private var view: View? = null
     private data class ContentKey(val snippets: List<Snippet>, val layout: SuggestionMenuLayout,
-        val dark: Boolean, val ink: Int, val width: Int, val fontScale: Float, val density: Float)
+        val dark: Boolean, val ink: Int, val width: Int, val fontScale: Float, val density: Float, val query: String)
     private var contentKey: ContentKey? = null
     private var lastAnchor: Rect? = null
     private var lastSafeBounds: Rect? = null
@@ -50,7 +50,8 @@ internal class SnippetSuggestionOverlay(
         colorMode: SuggestionColorMode,
         keyboardTop: Int? = null,
         resultColor: SuggestionResultColor = SuggestionResultColor.DEFAULT,
-        customResultColor: Int = 0xFF185ABD.toInt()
+        customResultColor: Int = 0xFF185ABD.toInt(),
+        query: String = ""
     ) {
         if (snippets.isEmpty()) { dismiss(); return }
 
@@ -73,7 +74,7 @@ internal class SnippetSuggestionOverlay(
                 Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES)
         val ink = if (resultColor == SuggestionResultColor.CUSTOM) customResultColor else resultColor.argb(dark)
         val key = ContentKey(snippets, layout, dark, ink, widthLimit,
-            service.resources.configuration.fontScale, density)
+            service.resources.configuration.fontScale, density, query)
         val safeBounds = Rect(safeLeft, safeTop, safeRight, safeBottom)
         // Watchdog calls must not measure, rebuild, or redraw an unchanged popup.
         if (view != null && key == contentKey && lastAnchor == anchor && lastSafeBounds == safeBounds) return
@@ -101,7 +102,7 @@ internal class SnippetSuggestionOverlay(
             val rows = LinearLayout(service).apply { orientation = LinearLayout.VERTICAL }
             snippets.forEachIndexed { index, snippet ->
                 rows.addView(
-                    listItem(snippet, primary, secondary, ::dp),
+                    listItem(snippet, primary, secondary, query, ::dp),
                     LinearLayout.LayoutParams(widthLimit, LinearLayout.LayoutParams.WRAP_CONTENT)
                 )
                 if (index < snippets.lastIndex) {
@@ -121,22 +122,15 @@ internal class SnippetSuggestionOverlay(
             val cards = LinearLayout(service).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(6), 0, dp(6), 0)
+                setPadding(dp(6), dp(6), dp(6), dp(6))
             }
             snippets.forEachIndexed { index, snippet ->
                 cards.addView(
-                    railItem(snippet, primary, secondary, ::dp),
-                    LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                    railItem(snippet, primary, secondary, palette.base, query, ::dp),
+                    LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                        if (index < snippets.lastIndex) marginEnd = dp(7)
+                    }
                 )
-                if (index < snippets.lastIndex) {
-                    cards.addView(TextView(service).apply {
-                        text = "|"
-                        setTextColor(secondary)
-                        typeface = readingFont
-                        textSize = 14f
-                        gravity = Gravity.CENTER
-                    }, LinearLayout.LayoutParams(dp(14), dp(46)))
-                }
             }
             container.addView(HorizontalScrollView(service).apply {
                 isHorizontalScrollBarEnabled = false
@@ -216,51 +210,69 @@ internal class SnippetSuggestionOverlay(
         }
     }
 
-    private fun listItem(snippet: Snippet, primary: Int, secondary: Int, dp: (Int) -> Int) = object : LinearLayout(service) {
-        override fun setPressed(pressed: Boolean) {
-            super.setPressed(pressed)
-            respondToPress(pressed)
-        }
-    }.apply {
+    private fun listItem(snippet: Snippet, primary: Int, secondary: Int, query: String, dp: (Int) -> Int) =
+        object : LinearLayout(service) {
+            override fun setPressed(pressed: Boolean) {
+                super.setPressed(pressed)
+                respondToPress(pressed)
+            }
+        }.apply {
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.CENTER_VERTICAL
-        minimumHeight = dp(48)
-        setPadding(dp(14), dp(6), dp(14), dp(6))
+        minimumHeight = dp(50)
+        setPadding(dp(14), dp(7), dp(14), dp(7))
         background = pressBackground(dp)
         contentDescription = "${snippet.expansion}, ${snippet.trigger}"
         setOnClickListener { onSelected(snippet) }
-        addView(label(preview(snippet.expansion), primary, 14f, readingFont),
-            LinearLayout.LayoutParams(-1, -2))
-        addView(label(snippet.trigger, secondary, 10f, readingFont).apply {
-            setPadding(0, dp(3), 0, 0)
+        addView(label(preview(snippet.expansion), primary, 14.5f, readingFont).apply {
+            typeface = Typeface.create(readingFont, Typeface.BOLD)
         }, LinearLayout.LayoutParams(-1, -2))
+        addView(triggerChip(snippet.trigger, query, primary, secondary, dp), LinearLayout.LayoutParams(-2, -2).apply {
+            topMargin = dp(4)
+        })
     }
 
-    private fun railItem(snippet: Snippet, primary: Int, secondary: Int, dp: (Int) -> Int) = object : TextView(service) {
-        override fun setPressed(pressed: Boolean) {
-            super.setPressed(pressed)
-            respondToPress(pressed)
-        }
-    }.apply {
-        val expansion = preview(snippet.expansion)
-        val trigger = "  ${snippet.trigger}"
-        text = SpannableString(expansion + trigger).apply {
-            setSpan(ForegroundColorSpan(primary), 0, expansion.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-            setSpan(ForegroundColorSpan(secondary), expansion.length, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-            setSpan(RelativeSizeSpan(0.78f), expansion.length, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        }
-        typeface = readingFont
-        textSize = 14f
-        setSingleLine(true)
-        ellipsize = TextUtils.TruncateAt.END
-        maxWidth = dp(320)
-        minHeight = dp(48)
-        background = pressBackground(dp)
-        gravity = Gravity.CENTER_VERTICAL
-        setPadding(dp(12), dp(6), dp(12), dp(6))
+    private fun railItem(snippet: Snippet, primary: Int, secondary: Int, chipTint: Int, query: String, dp: (Int) -> Int) =
+        object : LinearLayout(service) {
+            override fun setPressed(pressed: Boolean) {
+                super.setPressed(pressed)
+                respondToPress(pressed)
+            }
+        }.apply {
+        orientation = LinearLayout.VERTICAL
+        gravity = Gravity.CENTER_HORIZONTAL
+        minimumHeight = dp(50)
+        minimumWidth = dp(68)
+        background = cardBackground(chipTint, dp)
+        setPadding(dp(13), dp(7), dp(13), dp(7))
         contentDescription = "${snippet.expansion}, ${snippet.trigger}"
         setOnClickListener { onSelected(snippet) }
+        addView(label(preview(snippet.expansion), primary, 14.5f, readingFont).apply {
+            typeface = Typeface.create(readingFont, Typeface.BOLD)
+            gravity = Gravity.CENTER_HORIZONTAL
+            maxWidth = dp(200)
+        }, LinearLayout.LayoutParams(-2, -2))
+        addView(triggerChip(snippet.trigger, query, primary, secondary, dp).apply {
+            maxWidth = dp(200)
+        }, LinearLayout.LayoutParams(-2, -2).apply {
+            topMargin = dp(4)
+        })
     }
+
+    /** The part of the trigger the user already typed is picked out in the accent
+     *  color, so a row full of near-identical triggers stays scannable at a glance. */
+    private fun triggerChip(trigger: String, query: String, matchTint: Int, restTint: Int, dp: (Int) -> Int) =
+        label(trigger, restTint, 11f, readingFont).apply {
+            val matched = if (query.isNotEmpty() && trigger.startsWith(query, ignoreCase = true)) query.length else 0
+            if (matched > 0) {
+                text = SpannableString(trigger).apply {
+                    setSpan(ForegroundColorSpan(matchTint), 0, matched, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    setSpan(StyleSpan(Typeface.BOLD), 0, matched, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                }
+            }
+            setPadding(dp(7), dp(3), dp(7), dp(3))
+            background = shape((restTint and 0x00FFFFFF) or 0x26000000, Color.TRANSPARENT, dp(7), 0)
+        }
 
     private fun View.respondToPress(pressed: Boolean) {
         if (!ValueAnimator.areAnimatorsEnabled()) return
@@ -286,6 +298,14 @@ internal class SnippetSuggestionOverlay(
             intArrayOf(0x24808080, Color.TRANSPARENT)),
         null,
         shape(Color.WHITE, Color.TRANSPARENT, dp(14), 0)
+    )
+
+    /** A rail chip's resting card tint, with the same ripple feedback as a list row. */
+    private fun cardBackground(tint: Int, dp: (Int) -> Int) = RippleDrawable(
+        ColorStateList(arrayOf(intArrayOf(android.R.attr.state_pressed), intArrayOf()),
+            intArrayOf(0x24808080, Color.TRANSPARENT)),
+        shape(tint, Color.TRANSPARENT, dp(16), 0),
+        shape(Color.WHITE, Color.TRANSPARENT, dp(16), 0)
     )
 
     private data class Palette(val surface: Int, val base: Int, val border: Int, val primary: Int, val secondary: Int)
